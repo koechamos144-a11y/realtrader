@@ -1,0 +1,1043 @@
+<script>
+/* ============================================================
+   1 · HELPERS
+   ============================================================ */
+const $  = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const fmt = (n, d = 2) => Number(n || 0).toLocaleString('en-US', {
+  minimumFractionDigits: d, maximumFractionDigits: d
+});
+const money = n => (n < 0 ? '-$' : '$') + fmt(Math.abs(n), 2);
+const uid = () => Math.random().toString(36).slice(2, 10);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+const LS = {
+  get(k, f) { try { const v = localStorage.getItem(k); return v == null ? f : JSON.parse(v); } catch (e) { return f; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+  del(k)    { try { localStorage.removeItem(k); } catch (e) {} }
+};
+
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = 'toast toast--' + type;
+  el.innerHTML = `<span class="toast__dot"></span><span>${msg}</span>`;
+  $('#toasts').appendChild(el);
+  setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 260); }, 3400);
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); return; }
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+/* ============================================================
+   2 · AUTHENTICATION (demo-grade, localStorage backed)
+   ============================================================ */
+const HASH_SALT = 'vtx::static-demo-salt::';
+
+/* Lightweight non-cryptographic hash. NEVER do this in production —
+   hash passwords server-side with bcrypt / argon2. */
+function hashPw(pw) {
+  let h = 2166136261;
+  const s = HASH_SALT + pw;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16);
+}
+
+function setError(inputId, msg) {
+  const input = document.getElementById(inputId);
+  if (input) {
+    const field = input.closest('.field');
+    if (field) field.classList.toggle('invalid', !!msg);
+  }
+  const err = document.querySelector(`[data-error-for="${inputId}"]`);
+  if (err) err.textContent = msg || '';
+  return !msg;
+}
+
+function clearErrors(form) {
+  $$('.field', form).forEach(f => f.classList.remove('invalid'));
+  $$('.field__error', form).forEach(e => e.textContent = '');
+}
+
+/* ---- auth tab switching ---- */
+$$('[data-auth-tab]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const tab = btn.dataset.authTab;
+    $$('[data-auth-tab]').forEach(b => b.classList.toggle('is-active', b === btn));
+    $('#loginForm').classList.toggle('hidden', tab !== 'login');
+    $('#registerForm').classList.toggle('hidden', tab !== 'register');
+  });
+});
+
+/* ---- show / hide password ---- */
+$$('[data-toggle]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const input = document.getElementById(btn.dataset.toggle);
+    const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    btn.textContent = show ? 'Hide' : 'Show';
+  });
+});
+
+/* ---- live validation feedback ---- */
+$$('#loginForm input, #registerForm input').forEach(inp => {
+  inp.addEventListener('input', () => {
+    if (inp.closest('.field') && inp.closest('.field').classList.contains('invalid')) setError(inp.id, '');
+    if (inp.id === 'regPassword') updateStrength(inp.value);
+    if (inp.id === 'regTerms') $('#termsWrap').classList.remove('invalid');
+  });
+});
+
+function updateStrength(pw) {
+  let score = 0;
+  if (pw.length >= 8) score++;
+  if (/[A-Z]/.test(pw) && /[a-z]/.test(pw)) score++;
+  if (/\d/.test(pw)) score++;
+  if (/[^A-Za-z0-9]/.test(pw) && pw.length >= 10) score++;
+  $('#strength').dataset.score = pw ? score : 0;
+}
+
+/* ---- register ---- */
+$('#registerForm').addEventListener('submit', e => {
+  e.preventDefault();
+  clearErrors(e.target);
+
+  const name  = $('#regName').value.trim();
+  const email = $('#regEmail').value.trim().toLowerCase();
+  const pw    = $('#regPassword').value;
+  const pw2   = $('#regConfirm').value;
+  const terms = $('#regTerms').checked;
+  const emailRe = /^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/;
+
+  let ok = true;
+  ok = setError('regName', name.length < 2 ? 'Please enter your full name' : '') && ok;
+  ok = setError('regEmail', !email ? 'Email is required'
+      : !emailRe.test(email) ? 'Enter a valid email address' : '') && ok;
+  ok = setError('regPassword', !pw ? 'Password is required'
+      : pw.length < 8 ? 'Use at least 8 characters'
+      : (!/[A-Za-z]/.test(pw) || !/\d/.test(pw)) ? 'Include at least one letter and one number' : '') && ok;
+  ok = setError('regConfirm', pw2 !== pw ? 'Passwords do not match' : '') && ok;
+
+  if (!terms) { $('#termsWrap').classList.add('invalid'); ok = false; }
+  if (!ok) { toast('Please fix the highlighted fields', 'error'); return; }
+
+  const users = LS.get('vtx.users', []);
+  if (users.some(u => u.email === email)) {
+    setError('regEmail', 'An account with this email already exists');
+    toast('That email is already registered', 'error');
+    return;
+  }
+
+  const user = { id: uid(), name, email, hash: hashPw(pw), created: Date.now() };
+  users.push(user);
+  LS.set('vtx.users', users);
+
+  toast('Account created — welcome to Vertex', 'success');
+  startSession(user);
+});
+
+/* ---- login ---- */
+$('#loginForm').addEventListener('submit', e => {
+  e.preventDefault();
+  clearErrors(e.target);
+
+  const email = $('#loginEmail').value.trim().toLowerCase();
+  const pw    = $('#loginPassword').value;
+
+  let ok = true;
+  ok = setError('loginEmail', !email ? 'Email is required' : '') && ok;
+  ok = setError('loginPassword', !pw ? 'Password is required' : '') && ok;
+  if (!ok) return;
+
+  const users = LS.get('vtx.users', []);
+  const user = users.find(u => u.email === email);
+
+  if (!user) { setError('loginEmail', 'No account found with that email'); return; }
+  if (user.hash !== hashPw(pw)) { setError('loginPassword', 'Incorrect password'); return; }
+
+  toast(`Welcome back, ${user.name.split(' ')[0]}`, 'success');
+  startSession(user);
+});
+
+/* ---- demo account ---- */
+$('#demoBtn').addEventListener('click', () => {
+  const users = LS.get('vtx.users', []);
+  let user = users.find(u => u.email === 'demo@vertex.io');
+  if (!user) {
+    user = { id: uid(), name: 'Demo Trader', email: 'demo@vertex.io', hash: hashPw('demo1234'), created: Date.now() };
+    users.push(user);
+    LS.set('vtx.users', users);
+  }
+  toast('Signed in to the demo account', 'success');
+  startSession(user);
+});
+
+/* ---- session ---- */
+function startSession(user) {
+  state.user = user;
+  LS.set('vtx.session', { email: user.email });
+  loadUserState();
+  showApp();
+}
+
+function endSession() {
+  LS.del('vtx.session');
+  state.user = null;
+  $('#app').classList.add('hidden');
+  $('#authScreen').classList.remove('hidden');
+  $('#userPop').classList.add('hidden');
+  $('#loginForm').reset();
+  $('#registerForm').reset();
+  $('#strength').dataset.score = 0;
+  clearErrors($('#loginForm'));
+  clearErrors($('#registerForm'));
+  toast('Signed out', 'info');
+}
+
+/* ============================================================
+   3 · MARKET ENGINE
+   ============================================================ */
+const MARKETS = [
+  { sym: 'BTC/USDT', name: 'Bitcoin',       base: 'BTC',  quote: 'USDT', price: 67432.50, vol: 0.0016, dec: 2, color: '#f7931a' },
+  { sym: 'ETH/USDT', name: 'Ethereum',      base: 'ETH',  quote: 'USDT', price: 3486.20,  vol: 0.0019, dec: 2, color: '#627eea' },
+  { sym: 'SOL/USDT', name: 'Solana',        base: 'SOL',  quote: 'USDT', price: 172.35,   vol: 0.0028, dec: 2, color: '#14f195' },
+  { sym: 'AAPL',     name: 'Apple Inc.',    base: 'AAPL', quote: 'USD',  price: 214.28,   vol: 0.0011, dec: 2, color: '#a2aaad' },
+  { sym: 'TSLA',     name: 'Tesla Inc.',    base: 'TSLA', quote: 'USD',  price: 243.90,   vol: 0.0024, dec: 2, color: '#e82127' },
+  { sym: 'EUR/USD',  name: 'Euro / Dollar', base: 'EUR',  quote: 'USD',  price: 1.0864,   vol: 0.0006, dec: 4, color: '#3b82f6' },
+  { sym: 'XAU/USD',  name: 'Gold Spot',     base: 'XAU',  quote: 'USD',  price: 2338.10,  vol: 0.0009, dec: 2, color: '#f0b90b' }
+];
+MARKETS.forEach(m => { m.open24 = m.price * (1 + (Math.random() - 0.5) * 0.03); });
+
+const TF = {
+  '1m':  { count: 60, min: 1 },
+  '5m':  { count: 70, min: 5 },
+  '15m': { count: 80, min: 15 },
+  '1h':  { count: 90, min: 60 },
+  '4h':  { count: 90, min: 240 },
+  '1D':  { count: 80, min: 1440 }
+};
+
+const candleCache = {};
+
+function genCandles(m, n = 150) {
+  const out = [];
+  let p = m.price * (1 + (Math.random() - 0.5) * m.vol * 20);
+  for (let i = 0; i < n; i++) {
+    const o = p;
+    const c = Math.max(p * 0.4, o + (Math.random() - 0.5) * m.vol * 6 * p);
+    const h = Math.max(o, c) + Math.random() * m.vol * 1.6 * p;
+    const l = Math.min(o, c) - Math.random() * m.vol * 1.6 * p;
+    out.push({ o, h, l, c });
+    p = c;
+  }
+  const k = m.price / out[n - 1].c;
+  out.forEach(cd => { cd.o *= k; cd.h *= k; cd.l *= k; cd.c *= k; });
+  return out;
+}
+
+function candlesFor(sym) {
+  if (!candleCache[sym]) {
+    candleCache[sym] = genCandles(MARKETS.find(x => x.sym === sym));
+  }
+  return candleCache[sym];
+}
+
+const activeMarket = () => MARKETS.find(m => m.sym === state.active);
+const change24 = m => ((m.price - m.open24) / m.open24) * 100;
+
+/* ============================================================
+   4 · STATE
+   ============================================================ */
+const state = {
+  user: null,
+  balance: 100000,
+  positions: [],
+  orders: [],
+  history: [],
+  active: 'BTC/USDT',
+  side: 'buy',
+  otype: 'market',
+  tf: '15m',
+  leverage: 10,
+  tab: 'positions'
+};
+
+function saveState() {
+  if (!state.user) return;
+  LS.set('vtx.state.' + state.user.email, {
+    balance: state.balance,
+    positions: state.positions,
+    orders: state.orders,
+    history: state.history
+  });
+}
+
+function loadUserState() {
+  const saved = LS.get('vtx.state.' + state.user.email, null);
+  if (saved) {
+    state.balance   = saved.balance != null ? saved.balance : 100000;
+    state.positions = saved.positions || [];
+    state.orders    = saved.orders || [];
+    state.history   = saved.history || [];
+  } else {
+    state.balance = 100000;
+    state.positions = [];
+    state.orders = [];
+    state.history = [];
+  }
+}
+
+/* ============================================================
+   5 · APP BOOT
+   ============================================================ */
+function showApp() {
+  $('#authScreen').classList.add('hidden');
+  $('#app').classList.remove('hidden');
+
+  const initials = state.user.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+  $('#avatarInitials').textContent = initials;
+  $('#popName').textContent = state.user.name;
+  $('#popEmail').textContent = state.user.email;
+
+  buildWatchlist();
+  buildTicker();
+  setActive(state.active);
+  renderBottom();
+  updatePrices();
+  updateEquity();
+  updateOrderSummary();
+
+  requestAnimationFrame(() => { resizeChart(); drawChart(); });
+}
+
+/* ============================================================
+   6 · WATCHLIST + TICKER + PRICES
+   ============================================================ */
+const lastPrice = {};
+
+function buildWatchlist() {
+  const el = $('#watchlist');
+  el.innerHTML = MARKETS.map(m => `
+    <div class="watch-row" data-sym="${m.sym}">
+      <div class="watch-row__sym">
+        <div class="watch-row__dot" style="background:${m.color}">${m.base.slice(0, 3)}</div>
+        <div>
+          <strong>${m.sym}</strong>
+          <small>${m.name}</small>
+        </div>
+      </div>
+      <div class="watch-row__px">
+        <span class="js-price">—</span>
+        <span class="chg js-chg">—</span>
+      </div>
+    </div>`).join('');
+
+  el.onclick = e => {
+    const row = e.target.closest('.watch-row');
+    if (row) setActive(row.dataset.sym);
+  };
+}
+
+function buildTicker() {
+  $('#ticker').innerHTML = MARKETS.map(m => `
+    <div class="tick" data-sym="${m.sym}">
+      <span>${m.sym}</span>
+      <strong class="js-tprice">—</strong>
+      <em class="js-tchg">—</em>
+    </div>`).join('');
+}
+
+function setActive(sym) {
+  state.active = sym;
+  const m = activeMarket();
+  candlesFor(sym);
+
+  $$('.watch-row').forEach(r => r.classList.toggle('is-active', r.dataset.sym === sym));
+  $('#chartSym').textContent = m.sym;
+  $('#chartName').textContent = m.name;
+  $('#baseUnit').textContent = m.base;
+  $('#limitPrice').value = m.price.toFixed(m.dec);
+  $('#limitPrice').step = m.dec >= 4 ? '0.0001' : '0.01';
+
+  const recent = candlesFor(sym).slice(-80);
+  $('#statHigh').textContent = fmt(Math.max(...recent.map(c => c.h)), m.dec);
+  $('#statLow').textContent  = fmt(Math.min(...recent.map(c => c.l)), m.dec);
+  $('#statVol').textContent  = fmt(m.price * (Math.random() * 800 + 200) / 1000, 1) + 'K';
+
+  updateSubmitButton();
+  renderOrderBook();
+  drawChart();
+  updateOrderSummary();
+}
+
+function updateSubmitButton() {
+  const m = activeMarket();
+  const btn = $('#submitOrder');
+  const isBuy = state.side === 'buy';
+  btn.className = 'btn btn--block ' + (isBuy ? 'btn--buy' : 'btn--sell');
+  btn.textContent = (isBuy ? 'Buy ' : 'Sell ') + m.base;
+}
+
+function updatePrices() {
+  MARKETS.forEach(m => {
+    const row = document.querySelector(`.watch-row[data-sym="${m.sym}"]`);
+    if (row) {
+      const pEl = row.querySelector('.js-price');
+      const cEl = row.querySelector('.js-chg');
+      pEl.textContent = fmt(m.price, m.dec);
+      const prev = lastPrice[m.sym];
+      if (prev !== undefined && prev !== m.price) {
+        pEl.style.color = m.price > prev ? 'var(--up)' : 'var(--down)';
+      }
+      lastPrice[m.sym] = m.price;
+
+      const pct = change24(m);
+      cEl.textContent = (pct >= 0 ? '+' : '') + fmt(pct, 2) + '%';
+      cEl.className = 'chg js-chg ' + (pct >= 0 ? 'up' : 'down');
+    }
+
+    const tick = document.querySelector(`.tick[data-sym="${m.sym}"]`);
+    if (tick) {
+      tick.querySelector('.js-tprice').textContent = fmt(m.price, m.dec);
+      const pct = change24(m);
+      const t = tick.querySelector('.js-tchg');
+      t.textContent = (pct >= 0 ? '+' : '') + fmt(pct, 2) + '%';
+      t.className = 'js-tchg ' + (pct >= 0 ? 'up' : 'down');
+    }
+  });
+
+  const m = activeMarket();
+  const priceEl = $('#chartPrice');
+  const prevActive = priceEl.dataset.prev ? parseFloat(priceEl.dataset.prev) : m.price;
+  priceEl.textContent = fmt(m.price, m.dec);
+  priceEl.style.color = m.price >= prevActive ? 'var(--up)' : 'var(--down)';
+  priceEl.dataset.prev = m.price;
+
+  const pct = change24(m);
+  const chgEl = $('#chartChange');
+  chgEl.textContent = (pct >= 0 ? '+' : '') + fmt(pct, 2) + '%';
+  chgEl.className = 'chg ' + (pct >= 0 ? 'up' : 'down');
+
+  updatePositionsLive();
+  updateEquity();
+}
+
+/* ============================================================
+   7 · CHART
+   ============================================================ */
+const canvas = $('#chart');
+const ctx = canvas.getContext('2d');
+const chartState = { w: 0, h: 0, mouse: null };
+
+function resizeChart() {
+  if (!canvas || !canvas.parentElement) return;
+  const wrap = canvas.parentElement;
+  const dpr = window.devicePixelRatio || 1;
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  if (w === 0 || h === 0) return;
+  canvas.width  = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  canvas.style.width  = w + 'px';
+  canvas.style.height = h + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  chartState.w = w;
+  chartState.h = h;
+  drawChart();
+}
+
+function drawChart() {
+  if (!chartState.w || !chartState.h) return;
+
+  const m = activeMarket();
+  const all = candlesFor(m.sym);
+  const n = TF[state.tf].count;
+  const data = all.slice(-n);
+
+  const W = chartState.w, H = chartState.h;
+  const padL = 10, padR = 78, padT = 12, padB = 26;
+  const pw = W - padL - padR, ph = H - padT - padB;
+  if (pw <= 10 || ph <= 10) return;
+
+  let hi = -Infinity, lo = Infinity;
+  for (const c of data) { if (c.h > hi) hi = c.h; if (c.l < lo) lo = c.l; }
+  state.positions.filter(p => p.sym === m.sym).forEach(p => {
+    hi = Math.max(hi, p.entry); lo = Math.min(lo, p.entry);
+  });
+  const pad = (hi - lo) * 0.08 || hi * 0.01;
+  hi += pad; lo -= pad;
+  const range = (hi - lo) || 1;
+
+  const yOf = p => padT + (hi - p) / range * ph;
+  const xOf = i => padL + (i + 0.5) * (pw / data.length);
+  const cw = clamp((pw / data.length) * 0.62, 1.5, 13);
+
+  ctx.clearRect(0, 0, W, H);
+
+  /* grid + price axis */
+  ctx.font = '11px ui-monospace, Menlo, Consolas, monospace';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  for (let i = 0; i <= 4; i++) {
+    const y = padT + ph * i / 4;
+    ctx.strokeStyle = '#151c25';
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + pw, y); ctx.stroke();
+    ctx.fillStyle = '#697586';
+    ctx.fillText(fmt(hi - range * i / 4, m.dec), padL + pw + 9, y);
+  }
+
+  /* time axis */
+  const step = Math.max(1, Math.floor(data.length / 6));
+  const now = Date.now();
+  const tfMin = TF[state.tf].min;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let i = data.length - 1; i >= 0; i -= step) {
+    const x = xOf(i);
+    ctx.strokeStyle = '#151c25';
+    ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + ph); ctx.stroke();
+    const t = new Date(now - (data.length - 1 - i) * tfMin * 60000);
+    const label = tfMin >= 1440
+      ? `${t.getDate()}/${t.getMonth() + 1}`
+      : `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+    ctx.fillStyle = '#525d6c';
+    ctx.fillText(label, x, padT + ph + 8);
+  }
+
+  /* candles */
+  data.forEach((c, i) => {
+    const up = c.c >= c.o;
+    const col = up ? '#12c48b' : '#f7525f';
+    const x = xOf(i);
+    ctx.strokeStyle = col;
+    ctx.fillStyle = col;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, yOf(c.h)); ctx.lineTo(x, yOf(c.l)); ctx.stroke();
+    const yO = yOf(c.o), yC = yOf(c.c);
+    const top = Math.min(yO, yC);
+    const hgt = Math.max(1, Math.abs(yC - yO));
+    ctx.fillRect(x - cw / 2, top, cw, hgt);
+  });
+
+  /* position entry lines */
+  state.positions.filter(p => p.sym === m.sym).forEach(p => {
+    const y = yOf(p.entry);
+    if (y < padT || y > padT + ph) return;
+    ctx.setLineDash([3, 4]);
+    ctx.strokeStyle = p.side === 'long' ? 'rgba(18,196,139,.75)' : 'rgba(247,82,95,.75)';
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + pw, y); ctx.stroke();
+    ctx.setLineDash([]);
+  });
+
+  /* last price line */
+  const yLast = yOf(m.price);
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = 'rgba(240,185,11,.85)';
+  ctx.beginPath(); ctx.moveTo(padL, yLast); ctx.lineTo(padL + pw, yLast); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#f0b90b';
+  roundRect(ctx, padL + pw + 4, yLast - 10, padR - 10, 20, 5);
+  ctx.fill();
+  ctx.fillStyle = '#171200';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(fmt(m.price, m.dec), padL + pw + 9, yLast);
+
+  /* crosshair */
+  const ms = chartState.mouse;
+  let legendCandle = data[data.length - 1];
+  if (ms && ms.x > padL && ms.x < padL + pw && ms.y > padT && ms.y < padT + ph) {
+    ctx.strokeStyle = 'rgba(150,165,185,.35)';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(ms.x, padT); ctx.lineTo(ms.x, padT + ph); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(padL, ms.y); ctx.lineTo(padL + pw, ms.y); ctx.stroke();
+    ctx.setLineDash([]);
+
+    const hovered = clamp(Math.floor((ms.x - padL) / (pw / data.length)), 0, data.length - 1);
+    legendCandle = data[hovered];
+
+    const price = hi - (ms.y - padT) / ph * range;
+    ctx.fillStyle = '#2a3442';
+    roundRect(ctx, padL + pw + 4, ms.y - 10, padR - 10, 20, 5);
+    ctx.fill();
+    ctx.fillStyle = '#dfe6ef';
+    ctx.textAlign = 'left';
+    ctx.fillText(fmt(price, m.dec), padL + pw + 9, ms.y);
+  }
+
+  /* OHLC legend */
+  const lc = legendCandle;
+  const lcol = lc.c >= lc.o ? 'var(--up)' : 'var(--down)';
+  $('#chartLegend').innerHTML =
+    `<span>O <b style="color:${lcol}">${fmt(lc.o, m.dec)}</b></span>` +
+    `<span>H <b style="color:${lcol}">${fmt(lc.h, m.dec)}</b></span>` +
+    `<span>L <b style="color:${lcol}">${fmt(lc.l, m.dec)}</b></span>` +
+    `<span>C <b style="color:${lcol}">${fmt(lc.c, m.dec)}</b></span>`;
+}
+
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  chartState.mouse = { x: e.clientX - r.left, y: e.clientY - r.top };
+  drawChart();
+});
+canvas.addEventListener('mouseleave', () => {
+  chartState.mouse = null;
+  drawChart();
+});
+window.addEventListener('resize', resizeChart);
+
+/* ============================================================
+   8 · ORDER BOOK
+   ============================================================ */
+function renderOrderBook() {
+  const m = activeMarket();
+  const mid = m.price;
+  const spread = Math.max(mid * 0.00015, Math.pow(10, -m.dec));
+
+  const asks = [], bids = [];
+  let aTot = 0, bTot = 0;
+  for (let i = 0; i < 8; i++) {
+    const ap = mid + spread * (i + 1) * (0.5 + Math.random());
+    const bp = mid - spread * (i + 1) * (0.5 + Math.random());
+    const av = Math.random() * 2.5 + 0.04;
+    const bv = Math.random() * 2.5 + 0.04;
+    aTot += av; bTot += bv;
+    asks.push({ p: ap, v: av });
+    bids.push({ p: bp, v: bv });
+  }
+  const maxTot = Math.max(aTot, bTot);
+
+  /* asks — highest at top */
+  $('#bookAsks').innerHTML = asks.slice().reverse().map((r, i, arr) => {
+    const acc = arr.slice(0, i + 1).reduce((s, x) => s + x.v, 0);
+    return rowHtml(r, 'rgba(247,82,95,.9)', acc / maxTot, m.dec);
+  }).join('');
+
+  /* bids — highest at top */
+  $('#bookBids').innerHTML = bids.map((r, i) => {
+    const acc = bids.slice(0, i + 1).reduce((s, x) => s + x.v, 0);
+    return rowHtml(r, 'rgba(18,196,139,.9)', acc / maxTot, m.dec);
+  }).join('');
+
+  $('#bookMid').textContent = fmt(mid, m.dec);
+  $('#bookSpread').textContent = fmt(spread, m.dec);
+}
+
+function rowHtml(r, color, widthPct, dec) {
+  return `<div class="book__row">
+      <i style="width:${clamp(widthPct * 100, 2, 100)}%;background:${color}"></i>
+      <span class="p">${fmt(r.p, dec)}</span>
+      <span class="s">${fmt(r.v, 4)}</span>
+    </div>`;
+}
+
+/* ============================================================
+   9 · BOTTOM TABLES
+   ============================================================ */
+function pnlOf(p) {
+  const m = MARKETS.find(x => x.sym === p.sym);
+  return p.side === 'long' ? (m.price - p.entry) * p.size : (p.entry - m.price) * p.size;
+}
+
+function liqOf(p) {
+  const mmr = 0.005;
+  return p.side === 'long'
+    ? p.entry * (1 - 1 / p.lev + mmr)
+    : p.entry * (1 + 1 / p.lev - mmr);
+}
+
+function timeStr(ts) {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+}
+
+function renderBottom() {
+  const body = $('#bottomBody');
+
+  const pb = $('#posBadge'), ob = $('#ordBadge');
+  pb.textContent = state.positions.length;
+  pb.classList.toggle('hidden', state.positions.length === 0);
+  ob.textContent = state.orders.length;
+  ob.classList.toggle('hidden', state.orders.length === 0);
+
+  if (state.tab === 'positions') {
+    if (!state.positions.length) {
+      body.innerHTML = `<table class="tbl"><thead><tr>
+        <th>Symbol</th><th>Side</th><th>Size</th><th>Entry</th><th>Mark</th>
+        <th>Margin</th><th>PnL</th><th>Liq. price</th><th></th>
+        </tr></thead><tbody><tr class="empty-row"><td colspan="9">No open positions — place your first trade.</td></tr></tbody></table>`;
+      return;
+    }
+    body.innerHTML = `<table class="tbl"><thead><tr>
+        <th>Symbol</th><th>Side</th><th>Size</th><th>Entry</th><th>Mark</th>
+        <th>Margin</th><th>PnL</th><th>Liq. price</th><th></th>
+      </tr></thead><tbody>` +
+      state.positions.map(p => {
+        const m = MARKETS.find(x => x.sym === p.sym);
+        const pnl = pnlOf(p);
+        const pct = p.margin ? (pnl / p.margin) * 100 : 0;
+        return `<tr>
+          <td>${p.sym}</td>
+          <td><span class="tag ${p.side}">${p.side.toUpperCase()} ${p.lev}×</span></td>
+          <td>${fmt(p.size, 5)}</td>
+          <td>${fmt(p.entry, m.dec)}</td>
+          <td>${fmt(m.price, m.dec)}</td>
+          <td>${money(p.margin)}</td>
+          <td class="${pnl >= 0 ? 'up' : 'down'}">${pnl >= 0 ? '+' : ''}${money(pnl)} <small>(${pct >= 0 ? '+' : ''}${fmt(pct, 1)}%)</small></td>
+          <td>${fmt(liqOf(p), m.dec)}</td>
+          <td><button class="btn btn--ghost btn--xs" data-close="${p.id}">Close</button></td>
+        </tr>`;
+      }).join('') + '</tbody></table>';
+    return;
+  }
+
+  if (state.tab === 'orders') {
+    if (!state.orders.length) {
+      body.innerHTML = `<table class="tbl"><thead><tr>
+        <th>Time</th><th>Symbol</th><th>Side</th><th>Type</th><th>Price</th><th>Amount</th><th>Status</th><th></th>
+        </tr></thead><tbody><tr class="empty-row"><td colspan="8">No working orders.</td></tr></tbody></table>`;
+      return;
+    }
+    body.innerHTML = `<table class="tbl"><thead><tr>
+        <th>Time</th><th>Symbol</th><th>Side</th><th>Type</th><th>Price</th><th>Amount</th><th>Status</th><th></th>
+      </tr></thead><tbody>` +
+      state.orders.map(o => {
+        const m = MARKETS.find(x => x.sym === o.sym) || { dec: 2 };
+        return `<tr>
+          <td>${timeStr(o.time)}</td>
+          <td>${o.sym}</td>
+          <td><span class="tag ${o.side === 'buy' ? 'long' : 'short'}">${o.side.toUpperCase()}</span></td>
+          <td>${o.type.toUpperCase()}</td>
+          <td>${fmt(o.price, m.dec)}</td>
+          <td>${fmt(o.size, 5)}</td>
+          <td class="muted">Working</td>
+          <td><button class="btn btn--ghost btn--xs" data-cancel="${o.id}">Cancel</button></td>
+        </tr>`;
+      }).join('') + '</tbody></table>';
+    return;
+  }
+
+  /* history */
+  if (!state.history.length) {
+    body.innerHTML = `<table class="tbl"><thead><tr>
+      <th>Time</th><th>Symbol</th><th>Side</th><th>Type</th><th>Price</th><th>Amount</th><th>Fee</th><th>Realised PnL</th>
+      </tr></thead><tbody><tr class="empty-row"><td colspan="8">No trades yet.</td></tr></tbody></table>`;
+    return;
+  }
+  body.innerHTML = `<table class="tbl"><thead><tr>
+      <th>Time</th><th>Symbol</th><th>Side</th><th>Type</th><th>Price</th><th>Amount</th><th>Fee</th><th>Realised PnL</th>
+    </tr></thead><tbody>` +
+    state.history.slice(0, 60).map(h => {
+      const m = MARKETS.find(x => x.sym === h.sym) || { dec: 2 };
+      return `<tr>
+        <td>${timeStr(h.time)}</td>
+        <td>${h.sym}</td>
+        <td><span class="tag ${h.side === 'buy' ? 'long' : 'short'}">${h.side.toUpperCase()}</span></td>
+        <td>${h.type.toUpperCase()}</td>
+        <td>${fmt(h.price, m.dec)}</td>
+        <td>${fmt(h.size, 5)}</td>
+        <td>${money(h.fee)}</td>
+        <td class="${h.pnl > 0 ? 'up' : h.pnl < 0 ? 'down' : 'muted'}">${h.pnl ? (h.pnl > 0 ? '+' : '') + money(h.pnl) : '—'}</td>
+      </tr>`;
+    }).join('') + '</tbody></table>';
+}
+
+function updatePositionsLive() {
+  if (state.tab === 'positions') renderBottom();
+}
+
+/* delegated buttons inside the tables */
+$('#bottomBody').addEventListener('click', e => {
+  const closeBtn = e.target.closest('[data-close]');
+  if (closeBtn) { closePosition(closeBtn.dataset.close); return; }
+  const cancelBtn = e.target.closest('[data-cancel]');
+  if (cancelBtn) { cancelOrder(cancelBtn.dataset.cancel); }
+});
+
+$$('#bottomTabs button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    state.tab = btn.dataset.tab;
+    $$('#bottomTabs button').forEach(b => b.classList.toggle('is-active', b === btn));
+    renderBottom();
+  });
+});
+
+/* ============================================================
+   10 · TRADING
+   ============================================================ */
+function equity() {
+  let eq = state.balance;
+  state.positions.forEach(p => { eq += p.margin + pnlOf(p); });
+  return eq;
+}
+
+function updateEquity() {
+  $('#equityValue').textContent = money(equity());
+}
+
+function updateOrderSummary() {
+  const m = activeMarket();
+  const size = parseFloat($('#orderSize').value) || 0;
+  const price = state.otype === 'market'
+    ? m.price
+    : (parseFloat($('#limitPrice').value) || m.price);
+  const notional = size * price;
+  const margin = notional / state.leverage;
+  const fee = notional * 0.0005;
+
+  $('#availBal').textContent = money(state.balance);
+  $('#estPrice').textContent = fmt(price, m.dec);
+  $('#reqMargin').textContent = money(margin);
+  $('#feeVal').textContent = money(fee);
+}
+
+function placeOrder() {
+  const m = activeMarket();
+  const size = parseFloat($('#orderSize').value);
+
+  if (!size || size <= 0) { toast('Enter an amount greater than 0', 'error'); return; }
+
+  const isMarket = state.otype === 'market';
+  const price = isMarket
+    ? m.price
+    : (parseFloat($('#limitPrice').value) || m.price);
+
+  const notional = size * price;
+  const margin = notional / state.leverage;
+  const fee = notional * 0.0005;
+
+  if (margin + fee > state.balance) {
+    toast('Insufficient margin for this order', 'error');
+    return;
+  }
+
+  /* a limit order that doesn't cross the spread rests in the book */
+  const crosses = state.side === 'buy' ? price >= m.price : price <= m.price;
+  if (!isMarket && !crosses) {
+    state.orders.push({
+      id: uid(), time: Date.now(), sym: m.sym,
+      side: state.side, type: 'limit', price, size
+    });
+    toast(`Limit ${state.side} order placed at ${fmt(price, m.dec)}`, 'info');
+    $('#orderSize').value = '';
+    saveState(); renderBottom(); updateOrderSummary();
+    return;
+  }
+
+  fillOrder(m, state.side, isMarket ? 'market' : 'limit', price, size, margin, fee);
+}
+
+function fillOrder(m, side, type, price, size, margin, fee) {
+  state.balance -= (margin + fee);
+  const posSide = side === 'buy' ? 'long' : 'short';
+
+  const existing = state.positions.find(p => p.sym === m.sym && p.side === posSide);
+  if (existing) {
+    const total = existing.size + size;
+    existing.entry = (existing.entry * existing.size + price * size) / total;
+    existing.size = total;
+    existing.margin += margin;
+    existing.lev = state.leverage;
+  } else {
+    state.positions.push({
+      id: uid(), sym: m.sym, side: posSide, size, entry: price,
+      margin, lev: state.leverage, opened: Date.now()
+    });
+  }
+
+  state.history.unshift({
+    id: uid(), time: Date.now(), sym: m.sym, side, type, price, size, fee, pnl: 0
+  });
+
+  toast(`${side === 'buy' ? 'Bought' : 'Sold'} ${fmt(size, 5)} ${m.base} @ ${fmt(price, m.dec)}`, 'success');
+  $('#orderSize').value = '';
+  saveState(); renderBottom(); updateEquity(); updateOrderSummary(); drawChart();
+}
+
+function closePosition(id) {
+  const i = state.positions.findIndex(p => p.id === id);
+  if (i < 0) return;
+  const p = state.positions[i];
+  const m = MARKETS.find(x => x.sym === p.sym);
+  const pnl = pnlOf(p);
+  const fee = m.price * p.size * 0.0005;
+
+  state.balance += p.margin + pnl - fee;
+  state.positions.splice(i, 1);
+
+  state.history.unshift({
+    id: uid(), time: Date.now(), sym: p.sym,
+    side: p.side === 'long' ? 'sell' : 'buy',
+    type: 'close', price: m.price, size: p.size, fee, pnl
+  });
+
+  toast(`Position closed · PnL ${pnl >= 0 ? '+' : ''}${money(pnl)}`, pnl >= 0 ? 'success' : 'error');
+  saveState(); renderBottom(); updateEquity(); drawChart();
+}
+
+function cancelOrder(id) {
+  const i = state.orders.findIndex(o => o.id === id);
+  if (i < 0) return;
+  state.orders.splice(i, 1);
+  toast('Order cancelled', 'info');
+  saveState(); renderBottom();
+}
+
+/* ---- ticket controls ---- */
+$$('#sideToggle button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    state.side = btn.dataset.side;
+    $$('#sideToggle button').forEach(b => b.classList.toggle('is-active', b === btn));
+    updateSubmitButton();
+  });
+});
+
+$$('#otypeGroup button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    state.otype = btn.dataset.otype;
+    $$('#otypeGroup button').forEach(b => b.classList.toggle('is-active', b === btn));
+    $('#limitRow').classList.toggle('hidden', state.otype !== 'limit');
+    if (state.otype === 'limit') $('#limitPrice').value = activeMarket().price.toFixed(activeMarket().dec);
+    updateOrderSummary();
+  });
+});
+
+$$('#pctRow button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const m = activeMarket();
+    const price = state.otype === 'market'
+      ? m.price
+      : (parseFloat($('#limitPrice').value) || m.price);
+    const usable = state.balance * parseFloat(btn.dataset.pct);
+    const size = (usable * state.leverage) / price;
+    $('#orderSize').value = size.toFixed(m.dec >= 4 ? 4 : 5);
+    updateOrderSummary();
+  });
+});
+
+$('#levRange').addEventListener('input', e => {
+  state.leverage = parseInt(e.target.value, 10);
+  $('#levVal').textContent = state.leverage + '×';
+  updateOrderSummary();
+});
+
+$('#orderSize').addEventListener('input', updateOrderSummary);
+$('#limitPrice').addEventListener('input', updateOrderSummary);
+$('#submitOrder').addEventListener('click', placeOrder);
+
+$$('#tfGroup button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    state.tf = btn.dataset.tf;
+    $$('#tfGroup button').forEach(b => b.classList.toggle('is-active', b === btn));
+    drawChart();
+  });
+});
+
+/* ---- market search ---- */
+$('#marketSearch').addEventListener('input', e => {
+  const q = e.target.value.trim().toLowerCase();
+  $$('.watch-row').forEach(row => {
+    const m = MARKETS.find(x => x.sym === row.dataset.sym);
+    const hit = !q || m.sym.toLowerCase().includes(q) || m.name.toLowerCase().includes(q);
+    row.style.display = hit ? '' : 'none';
+  });
+});
+
+/* ---- user menu ---- */
+$('#avatarBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  $('#userPop').classList.toggle('hidden');
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('.usermenu')) $('#userPop').classList.add('hidden');
+});
+$('#logoutBtn').addEventListener('click', endSession);
+$('#resetBtn').addEventListener('click', () => {
+  state.balance = 100000;
+  state.positions = [];
+  state.orders = [];
+  state.history = [];
+  saveState(); renderBottom(); updateEquity(); updateOrderSummary(); drawChart();
+  $('#userPop').classList.add('hidden');
+  toast('Demo account reset to $100,000', 'success');
+});
+
+/* ============================================================
+   11 · MARKET ENGINE LOOP
+   ============================================================ */
+let tickCount = 0;
+
+function engineTick() {
+  if (!state.user) return;
+
+  MARKETS.forEach(m => {
+    const drift = (Math.random() - 0.5) * m.vol * m.price * 0.5;
+    m.price = Math.max(m.price * 0.5, m.price + drift);
+
+    const arr = candlesFor(m.sym);
+    const last = arr[arr.length - 1];
+    last.c = m.price;
+    last.h = Math.max(last.h, m.price);
+    last.l = Math.min(last.l, m.price);
+  });
+
+  tickCount++;
+  if (tickCount % 15 === 0) {
+    MARKETS.forEach(m => {
+      const arr = candlesFor(m.sym);
+      arr.push({ o: m.price, h: m.price, l: m.price, c: m.price });
+      if (arr.length > 220) arr.shift();
+    });
+  }
+
+  /* liquidation check */
+  state.positions.slice().forEach(p => {
+    const pnl = pnlOf(p);
+    if (pnl <= -p.margin) {
+      const m = MARKETS.find(x => x.sym === p.sym);
+      const fee = m.price * p.size * 0.0005;
+      state.balance += Math.max(0, p.margin + pnl - fee);
+      state.history.unshift({
+        id: uid(), time: Date.now(), sym: p.sym,
+        side: p.side === 'long' ? 'sell' : 'buy',
+        type: 'liquidated', price: m.price, size: p.size, fee, pnl
+      });
+      state.positions = state.positions.filter(x => x.id !== p.id);
+      toast(`Position on ${p.sym} was liquidated`, 'error');
+      saveState(); renderBottom(); updateEquity();
+    }
+  });
+
+  updatePrices();
+  drawChart();
+  renderOrderBook();
+}
+
+setInterval(engineTick, 1000);
+
+/* ============================================================
+   12 · BOOT — restore an existing session
+   ============================================================ */
+(function init() {
+  const sess = LS.get('vtx.session', null);
+  if (sess && sess.email) {
+    const users = LS.get('vtx.users', []);
+    const user = users.find(u => u.email === sess.email);
+    if (user) {
+      state.user = user;
+      loadUserState();
+      showApp();
+      toast(`Session restored · ${user.name}`, 'info');
+    }
+  }
+})();
+</script>
